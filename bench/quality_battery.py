@@ -10,6 +10,15 @@ Data (once):
   hf download HuggingFaceFW/fineweb-2 --repo-type dataset --include "data/dan_Latn/test/000_00000.parquet" --local-dir bench/quality-data/fineweb2
 Perplexity needs prompt_logprobs, which needs memory headroom: run the server with
 GPU_UTIL=0.93 for this (gotcha 10 in the README).
+
+On CTX=huge (KVarN) with SPEC=mtp, measure perplexity with PREFIX_CACHE=0. That
+combination corrupts prompt_logprobs: some requests 400 with "Out of range float
+values are not JSON compliant: nan", and the batteries that do complete read
+~23% high on English (12.6-13.7 against 10.76) and drift run to run. Setting
+PREFIX_CACHE=0 makes the same server exact and stable to four decimals. SPEC=off
+and SPEC=dflash2 on KVarN are unaffected, at the same pool size, and so is
+CTX=fast on all three settings, so the published quality tables are not
+implicated. Measured in #64 (gotcha 46).
 Usage: python bench/quality_battery.py <tag> [--ppl-only] [--gsm-only] [--gsm-n 200]
 """
 import json, os, sys, glob, re, math, time, random
@@ -18,7 +27,12 @@ from concurrent.futures import ThreadPoolExecutor
 import pyarrow.parquet as pq
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-KEY = os.environ.get("VLLM_API_KEY") or open(os.path.join(HERE, "..", "api_key.txt")).read().strip()
+def _key(path):  # a key is optional; keyless servers ignore the header
+    try:
+        return open(path).read().strip()
+    except OSError:
+        return ""
+KEY = os.environ.get("VLLM_API_KEY") or _key(os.path.join(HERE, "..", "api_key.txt"))
 API = os.environ.get("VLLM_API", "http://127.0.0.1:18020/v1")
 # data dir: wikitext-2 test parquet, fineweb-2 dan_Latn test parquet, gsm8k test parquet (see README)
 Q = os.environ.get("QUALITY_DATA", os.path.join(HERE, "quality-data"))

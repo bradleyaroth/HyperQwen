@@ -1,7 +1,7 @@
 Vocab-truncated draft head for Qwen3.5/3.8 MTP speculative decoding.
 
 If the model directory contains mtp_draft_vocab_ids.pt and the checkpoint has
-mtp.draft_lm_head.* tensors (both produced by build_draft_vocab.py), the MTP
+mtp.draft_lm_head.* tensors (both produced by prepare/build_draft_vocab.py), the MTP
 drafter scores only those rows instead of the full 248k-row lm_head; logits of
 all other ids are -inf. Speculative decoding stays exact (rejection sampling
 uses the target model), only the acceptance rate can change. Set
@@ -10,11 +10,21 @@ MTP_DRAFT_VOCAB=0 to fall back to the shared full lm_head.
 Apply from the installed vllm package directory:
   patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/qwen3_5-mtp-draft-vocab.patch
 
-Written against vLLM 0.27.1.
+Validated against vLLM 0.28.0.
 
+Kind: feature
+What: vocab-truncated draft head for MTP
+Upstream: none
+Cut-against: 0.30.0
+Retires-when: upstreamed
+
+--- exported from 57b5c1a94 (qwen3_5-mtp-draft-vocab); regenerate with scripts/export-patch.sh, do not edit ---
+
+diff --git a/model_executor/models/qwen3_5_mtp.py b/model_executor/models/qwen3_5_mtp.py
+index d424d0c63..3e4421645 100644
 --- a/model_executor/models/qwen3_5_mtp.py
 +++ b/model_executor/models/qwen3_5_mtp.py
-@@ -86,6 +86,26 @@
+@@ -89,6 +89,26 @@
              prefix=maybe_prefix(prefix, "embed_tokens"),
          )
  
@@ -41,7 +51,7 @@ Written against vLLM 0.27.1.
          # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
          # missing from hf_quant_config.json exclude_modules. Force unquantized.
          # Ref: https://github.com/vllm-project/vllm/pull/38650
-@@ -253,6 +273,12 @@
+@@ -257,6 +277,12 @@
              self.lm_head = PPMissingLayer()
  
          self.logits_processor = LogitsProcessor(config.vocab_size)
@@ -52,9 +62,9 @@ Written against vLLM 0.27.1.
 +            else None
 +        )
  
-     def embed_input_ids(
-         self,
-@@ -299,11 +325,26 @@
+         self.make_empty_intermediate_tensors = (
+             self.model.make_empty_intermediate_tensors
+@@ -307,11 +333,26 @@
          hidden_states: torch.Tensor,
          spec_step_idx: int = 0,
      ) -> torch.Tensor | None:

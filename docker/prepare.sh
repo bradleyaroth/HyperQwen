@@ -1,0 +1,125 @@
+#!/bin/bash
+# One-shot model preparation, idempotent: the README's Setup steps (the scripts
+# in prepare/) against /app/models (a bind mount / volume), each skipped when its
+# result is already there. On the CPU (no GPU needed). ~19.5 GB download + a few minutes of
+# requantization; a fast-variant download of ~1 GB unless FAST_VARIANT=0, and the
+# ~1 GB W4A16 DFlash2 drafter (SPEC=dflash2) unless DFLASH2=0.
+#
+# Serialised with flock: a second concurrent prepare waits for the holder
+# (PREPARE_LOCK_WAIT, default 600 s) instead of mutating the same model dir.
+#
+#   docker compose run --rm prepare      (also runs automatically before single/batch)
+set -e
+cd /app
+export PATH=/app/venv/bin:$PATH
+BASE=${BASE_MODEL_DIR:-/app/models/Qwen3.8-27B-W4A16-AutoRound}
+HF_REPO=${HF_REPO:-dbirks/Qwen3.8-27B-W4A16-AutoRound}
+# Two prepares racing one model dir can interleave a shard rewrite with an index
+# write and leave the dir inconsistent, and the entrypoint runs prepare before
+# every start, so a booting container races `compose run prepare`. The lock sits
+# beside the model dir, not inside it, so BASE_MODEL_DIR cannot move it out of
+# the volume. Waiting is the normal case; only a timeout fails.
+MODELS_ROOT=$(dirname "$BASE")
+exec 9>"$MODELS_ROOT/.prepare.lock"
+flock -w "${PREPARE_LOCK_WAIT:-600}" 9 || { echo "prepare: another preparation still holds $MODELS_ROOT/.prepare.lock after ${PREPARE_LOCK_WAIT:-600}s; refusing to run concurrently"; exit 1; }
+
+state() {  # prints the steps still to do
+python - "$BASE" <<'EOF'
+import json, os, struct, sys
+d = sys.argv[1].rstrip("/") + "/"
+todo = []
+# tokenizer.json belongs in this list: without it transformers builds an empty
+# vocabulary rather than failing, and the dir stays servable-looking all the way to
+# "ReasoningConfig: failed to tokenize reasoning strings" at startup.
+if not all(os.path.exists(d + f) for f in
+           ("config.json", "model.safetensors.index.json", "tokenizer.json", "tokenizer_config.json")):
+    print("download"); sys.exit()
+# A kill during an in-place write by an older prepare can leave a truncated
+# config.json, index or shard (#195). Treat each as a download: a crash here
+# stops every later start under `set -e`, while `hf download` re-hashes each
+# file changed since it was fetched and fetches it again when it differs.
+def intact(shard):
+    """The shard holds every byte its safetensors header declares."""
+    try:
+        size = os.path.getsize(shard)
+        with open(shard, "rb") as f:
+            n = struct.unpack("<Q", f.read(8))[0]
+            if 8 + n > size:
+                return False
+            header = json.loads(f.read(n))
+        end = max((v["data_offsets"][1] for k, v in header.items() if k != "__metadata__"), default=0)
+        return 8 + n + end <= size
+    except (OSError, ValueError, KeyError, TypeError, IndexError, AttributeError, struct.error):
+        return False
+try:
+    json.load(open(d + "config.json"))
+    idx = json.load(open(d + "model.safetensors.index.json"))["weight_map"]
+    shards = {str(f) for f in idx.values()}
+except (ValueError, KeyError, TypeError, AttributeError):
+    print("download"); sys.exit()
+if not all(intact(d + f) for f in shards):
+    print("download"); sys.exit()
+if "lm_head.weight_packed" not in idx: todo.append("lm_head")
+if not any(k.endswith("embed_tokens.weight_packed") for k in idx): todo.append("embed")
+if "mtp.layers.0.mlp.down_proj.weight_packed" not in idx: todo.append("mtp")
+if "mtp.draft_lm_head.weight_packed" not in idx or not os.path.exists(d + "mtp_draft_vocab_ids.pt"): todo.append("draft")
+if os.environ.get("FAST_VARIANT", "1") != "0" and not os.path.exists(d[:-1] + "-fast/model.safetensors.index.json"):
+    todo.append("fast")
+if os.environ.get("DFLASH2", "1") != "0" and not os.path.exists(os.path.dirname(d[:-1]) + "/Qwen3.8-27B-DFlash2-W4A16/model.safetensors"):
+    todo.append("dflash2")
+print(" ".join(todo))
+EOF
+}
+
+TODO=$(state)
+if [ "$TODO" = "download" ]; then
+  echo "== downloading $HF_REPO -> $BASE (~19.5 GB, resumable)"
+  hf download "$HF_REPO" --local-dir "$BASE"
+  TODO=$(state)
+fi
+[ "$TODO" = "download" ] && { echo "prepare: download incomplete (shards missing after hf download)"; exit 1; }
+for step in $TODO; do
+  case $step in
+    lm_head) echo "== quant_lm_head.py (int8 lm_head)";      python prepare/quant_lm_head.py "$BASE" ;;
+    embed)   echo "== quant_embed.py (int8 embeddings)";     python prepare/quant_embed.py "$BASE" ;;
+    mtp)     echo "== quant_mtp.py (int8 MTP module)";       python prepare/quant_mtp.py "$BASE" ;;
+    draft)   echo "== build_draft_vocab.py (40k draft head)"
+             python prepare/build_draft_vocab.py "$BASE" --ids prepare/draft_vocab_ids.json ;;
+    fast)    echo "== fetch_fast_variant.py (int4-GPTQ lm_head/MTP + own-output draft vocab, ~1 GB)"
+             python prepare/fetch_fast_variant.py "$BASE" "$BASE-fast" ;;
+    dflash2) echo "== fetch_dflash2.py (W4A16 DFlash2 drafter for SPEC=dflash2, ~1 GB; optional)"
+             python prepare/fetch_dflash2.py "$(dirname "$BASE")/Qwen3.8-27B-DFlash2-W4A16" \
+               || echo "prepare: DFlash2 drafter not fetched (optional: SPEC=dflash2 unavailable; DFLASH2=0 silences this)" ;;
+  esac
+done
+# Some clients (JetBrains AI Assistant) send tool-call arguments as a JSON
+# array instead of an object; harden the templates so `|items` does not blow up
+# ("Can only get item pairs from a mapping.") once for every prepared model.
+# A template that does not match the known pattern warns and is left alone;
+# only an unreadable one fails prepare. HARDEN_TEMPLATES=0 skips the step.
+if [ "${HARDEN_TEMPLATES:-1}" != "0" ]; then
+  python prepare/harden_chat_template.py
+fi
+# Gotcha 58: the shipped chat template accepts only xhigh/medium/low, so the
+# gpt-5 vocabulary clients speak (`minimal`, `high`, `max`) raises inside the
+# template and vLLM returns 400 for every request carrying one. Translate in
+# place: map only the names the template does not know (minimal -> low,
+# high/max -> xhigh); every other value falls through unchanged, so the
+# template's own levels keep their behaviour and an omitted effort keeps the
+# template default (xhigh). Idempotent (marker in the rewritten block, with a
+# v1 -> v2 upgrade) and self-healing: a re-download that clobbers
+# chat_template.jinja is re-translated on the next prepare. Also covers the
+# model actually served (MODEL) when it was prepared outside this script.
+# A template whose effort block matches no known shape warns and is left alone;
+# TRANSLATE_EFFORT=0 skips the step.
+if [ "${TRANSLATE_EFFORT:-1}" != "0" ]; then
+  DIRS=("$BASE")
+  [ -d "$BASE-fast" ] && DIRS+=("$BASE-fast")
+  if [ -n "${MODEL:-}" ] && [ -d "$MODEL" ] && [ "$MODEL" != "$BASE" ] && [ "$MODEL" != "$BASE-fast" ]; then
+    DIRS+=("$MODEL")
+  fi
+  python prepare/translate_chat_template.py "${DIRS[@]}"
+fi
+LEFT=$(state | sed 's/\bdflash2\b//')
+[ -z "${LEFT// /}" ] || { echo "prepare: steps still missing after run: $LEFT"; exit 1; }
+echo "prepare: model ready at $BASE$([ "${FAST_VARIANT:-1}" != 0 ] && echo " (+ $BASE-fast)")"

@@ -1,17 +1,26 @@
 #!/bin/bash
-# Install the KVarN KV-cache port into this repo's vLLM 0.27.1 venv:
+# Install the KVarN KV-cache port into this repo's vLLM 0.30.0 venv:
 # copies the new modules into site-packages/vllm and applies the upstream hunks.
-# usage: bash kvarn/install.sh            (idempotent-ish: re-copying files is fine;
-#        the patch is applied with --forward so a second run is a no-op)
+# usage: bash kvarn/install.sh            (idempotent: re-copying files is fine, and
+#        patches/apply.sh --kvarn skips a patch whose every hunk is already in the tree)
 set -e
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$HERE")"
-SP="$REPO/venv/lib/python3.12/site-packages/vllm"
-[ -d "$SP" ] || { echo "vllm not found at $SP"; exit 1; }
+PY=${PY:-$REPO/venv/bin/python}
+SP=$("$PY" -c 'import vllm, os; print(os.path.dirname(vllm.__file__))' 2>/dev/null | tail -n1)
+[ -n "$SP" ] && [ -d "$SP" ] || { echo "cannot import vllm with $PY (README: Setup)"; exit 1; }
 cp -r "$HERE/files/vllm/." "$SP/"
-patch -p1 -N -r /dev/null -d "$SP" < "$HERE/kvarn-0.27.1.patch" || true
+# patches/apply.sh --kvarn applies kvarn-0.30.0, kvarn-v2-runner-0.30.0 (lets SPEC=dflash2 run with
+# CTX=huge: KVarN KV + prefix caching, 240k), kvarn-recycled-pages-0.30.0 (the runner tells KVarN
+# which pages moved to another KV-cache group each step, so a late flush never lands on another
+# request's mamba state, #208) and kvarn-fp16-dequant-0.30.0 (registers KVARN_FP16_DEQUANT in
+# envs.py; the modules above read it through vllm.envs), in that order, at --fuzz 0, after the
+# whole patches/ series. It checks each patch with an exact reverse dry-run first, so a rerun is a
+# no-op, a venv installed before the fp16 patch existed only gets that patch, and a partly applied
+# patch fails by name.
+bash "$REPO/patches/apply.sh" --kvarn "$SP"
 find "$SP" -type d -name __pycache__ -path "*kvarn*" -prune -exec rm -rf {} + 2>/dev/null || true
-"$REPO/venv/bin/python" - <<'PY'
+"$PY" - <<'PY'
 from typing import get_args
 from vllm.config.cache import CacheDType
 assert "kvarn_k4v2_g128" in get_args(CacheDType)
