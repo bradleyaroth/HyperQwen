@@ -5,14 +5,15 @@ import json, os, sys, urllib.request
 import pyarrow.parquet as pq
 
 API = os.environ.get("VLLM_API", "http://127.0.0.1:8000/v1")
-KEY = os.environ.get("VLLM_API_KEY") or open(os.path.join(os.path.dirname(__file__), "..", "api_key.txt")).read().strip()
+KEY = os.environ.get("VLLM_API_KEY") or open(os.path.join(os.path.dirname(__file__), "..", "..", "api_key.txt")).read().strip()
+QUALITY_DATA = os.environ.get("QUALITY_DATA", os.path.join(os.path.dirname(__file__), "..", "..", "bench/quality-data"))
 NEEDLE = "The secret passphrase is CRIMSON-FALCON-8841. Remember it exactly."
 QUESTION = "What is the secret passphrase? Reply with only the passphrase and nothing else."
 
 def build(depth):
     from transformers import AutoTokenizer
-    t = AutoTokenizer.from_pretrained(os.environ.get("MODEL_DIR", os.path.join(os.path.dirname(__file__), "..", "models/Qwen3.8-27B-W4A16-AutoRound-fast")))
-    fb = pq.read_table(os.path.join(os.path.dirname(__file__), "quality-data/fineweb2/data/dan_Latn/test/000_00000.parquet"), columns=["text"]).column("text").to_pylist()
+    t = AutoTokenizer.from_pretrained(os.environ.get("MODEL_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "models/Qwen3.8-27B-W4A16-AutoRound-fast")))
+    fb = pq.read_table(os.path.join(QUALITY_DATA, "fineweb2/data/dan_Latn/test/000_00000.parquet"), columns=["text"]).column("text").to_pylist()
     docs = [d for d in fb if 200 < len(d) < 4000]
     parts = []; n = 0; i = 0
     while n < depth:

@@ -18,10 +18,10 @@ FIXED_PROMPT = ("Now write a Python function merge_intervals(intervals) that mer
     "space complexity.")
 
 API = os.environ.get("VLLM_API", "http://127.0.0.1:8000/v1")
-KEY = os.environ.get("VLLM_API_KEY") or open(os.path.join(os.path.dirname(__file__), "..", "api_key.txt")).read().strip()
+KEY = os.environ.get("VLLM_API_KEY") or open(os.path.join(os.path.dirname(__file__), "..", "..", "api_key.txt")).read().strip()
 MODEL = "qwen3.8-27b"
 MAX_MODEL_LEN = int(os.environ.get("MAX_MODEL_LEN", "262144"))
-QUALITY_DATA = os.environ.get("QUALITY_DATA", os.path.join(os.path.dirname(__file__), "quality-data"))
+QUALITY_DATA = os.environ.get("QUALITY_DATA", os.path.join(os.path.dirname(__file__), "..", "..", "bench/quality-data"))
 DEFAULT_MAX_TOKENS = 32768
 
 def load_corpus():
@@ -33,7 +33,7 @@ def load_corpus():
 
 def load_tokenizer():
     from transformers import AutoTokenizer
-    model = os.environ.get("MODEL_DIR", os.path.join(os.path.dirname(__file__), "..", "models/Qwen3.8-27B-W4A16-AutoRound-fast"))
+    model = os.environ.get("MODEL_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "models/Qwen3.8-27B-W4A16-AutoRound-fast"))
     return AutoTokenizer.from_pretrained(model)
 
 def build_fill(corpus, tok, target_tokens):

@@ -18,7 +18,7 @@ import urllib.request
 
 API = os.environ.get("VLLM_API", "http://127.0.0.1:8000/v1")
 KEY = os.environ.get("VLLM_API_KEY") or open(
-    os.path.join(os.path.dirname(__file__), "..", "api_key.txt")
+    os.path.join(os.path.dirname(__file__), "..", "..", "api_key.txt")
 ).read().strip()
 MODEL = "qwen3.8-27b"
 IMGDIR = os.environ.get("IMGDIR", "/mnt/llm_storage/qwen-030-upgrade/assets/vistest")
