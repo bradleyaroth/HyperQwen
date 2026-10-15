@@ -1,0 +1,32 @@
+# Deployment copy of the live unit (snapshot 2026-10-09,
+# phase0/snapshots/unit-qwen-vllm.service). Installed to
+# ~/.config/systemd/user/qwen-vllm.service at cutover (Phase 5). Differences from
+# the live unit: the unit-level EXTRA_ARGS line is GONE (the vision drop-in
+# local/systemd/qwen-vllm.service.d/vision.conf owns EXTRA_ARGS now, and the 0.30
+# launcher's TOOLS=1 default supplies --enable-auto-tool-choice/--tool-call-parser).
+[Unit]
+Description=Qwen3.8-27B vLLM server (CTX=huge KVarN 262k, single-user, GPU_UTIL 0.90 + whisper co-resident)
+After=nvidia-persistenced.service network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/llm_storage/qwen-serving
+Environment=PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+Environment=HF_HOME=/mnt/llm_storage/hf
+Environment=CTX=huge PORT=8000 GPU_UTIL=0.90 MAX_LEN=220000
+# `venv` in the working tree is a SYMLINK, switched at cutover (venv-027 <-> venv-030,
+# plan §2.2): venv entry points carry absolute shebangs, so never move or rename
+# the real directories. The interpreter underneath both venvs is a uv-managed
+# cpython shared with nothing else -- NEVER `uv python uninstall`/`uv upgrade` it:
+# both venvs die with it (plan risk #13).
+# Dirty-GPU gate (gotcha #2): wait until llama.cpp has truly released VRAM before
+# vLLM profiles its memory. Threshold ~2000 MiB leaves room for whisper (~660 MiB)
+# plus overhead; 60 iterations x 2s = 120s timeout, then fail.
+ExecStartPre=/bin/bash -c "for i in $(seq 1 60); do u=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits); [ \"$u\" -lt 2000 ] && exit 0; sleep 2; done; exit 1"
+ExecStart=/mnt/llm_storage/qwen-serving/single-user/start_qwen.sh
+TimeoutStartSec=900
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
